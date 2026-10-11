@@ -131,13 +131,13 @@ def finish_frames(config, job, options, result):
 
 def frame_content(config, run_id, index):
     job = find_job(config, run_id)
-    if type(index) is not int or not 0 <= index < 240:
+    if type(index) is not int or not 0 <= index < 1440:
         raise ValueError("Invalid frame index")
     data, _ = read_png(job / ('frame-%06d.png' % (index + 1)))
     return {'type': 'image', 'mimeType': 'image/png', 'data': base64.b64encode(data).decode('ascii')}
 
 
-def encode_mp4(config, run_id):
+def encode_mp4(config, run_id, audio_inputs=()):
     exe = config['ffmpeg_path']
     if not exe:
         raise ValueError("MP4 needs an explicitly configured existing ffmpeg; HTML playback needs none")
@@ -145,13 +145,13 @@ def encode_mp4(config, run_id):
     # Read only the manifest created by us, without following symlinks.
     fd = os.open(job / 'manifest.json', os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     with os.fdopen(fd) as stream:
-        raw = stream.read(32769)
-    if len(raw) > 32768:
+        raw = stream.read(131073)
+    if len(raw) > 131072:
         raise ValueError("Manifest too large")
     manifest = json.loads(raw)
     count = len(manifest['frames'])
     fps = manifest['fps']
-    if not 1 <= count <= 240 or type(fps) not in (int, float) or not 0 < fps <= 120:
+    if not 1 <= count <= 1440 or type(fps) not in (int, float) or not 0 < fps <= 120:
         raise ValueError("Invalid preview manifest")
     # Revalidate every input before the external encoder. Inputs are generated names only.
     for i in range(count):
@@ -159,13 +159,28 @@ def encode_mp4(config, run_id):
     destination = job / ('preview-' + uuid.uuid4().hex + '.mp4')
     args = [exe, '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
             '-protocol_whitelist', 'file', '-framerate', str(fps), '-start_number', '1',
-            '-i', str(job / 'frame-%06d.png'), '-frames:v', str(count), '-an',
-            '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-            '-threads', '2', '-fs', str(MAX_EXPORT_BYTES), '-movflags', '+faststart', str(destination)]
+            '-i', str(job / 'frame-%06d.png')]
+    if len(audio_inputs)>32: raise ValueError('Too many sound inputs')
+    filters=[]
+    duration=count/fps
+    for i,(path,delay,clip_duration) in enumerate(audio_inputs,1):
+        # Caller supplies only revalidated private PCM files, never tool paths.
+        from audio import regular, inspect_pcm
+        fd=regular(path,16*1024*1024)
+        with os.fdopen(fd,'rb') as stream: inspect_pcm(stream.read(16*1024*1024+1))
+        args.extend(['-protocol_whitelist','file','-i',str(path)])
+        trim=max(0,-delay); milliseconds=round(max(0,delay)*1000)
+        filters.append('[%d:a]atrim=start=%.8f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,adelay=%d|%d[a%d]'%(i,trim,milliseconds,milliseconds,i))
+    if audio_inputs:
+        filters.append(''.join('[a%d]'%i for i in range(1,len(audio_inputs)+1))+'amix=inputs=%d:duration=longest:normalize=0,alimiter=limit=0.95:latency=1,apad,atrim=duration=%.8f[mixed]'%(len(audio_inputs),duration))
+        args.extend(['-filter_complex',';'.join(filters),'-map','0:v:0','-map','[mixed]','-c:a','aac','-b:a','128k'])
+    else: args.append('-an')
+    args.extend(['-frames:v',str(count),'-t',str(duration),'-vf','pad=ceil(iw/2)*2:ceil(ih/2)*2',
+            '-c:v','libx264','-pix_fmt','yuv420p','-threads','2','-fs',str(MAX_EXPORT_BYTES),'-movflags','+faststart',str(destination)])
     # No shell, PATH lookup, network input, inherited application tokens or prompts.
     subprocess.run(args, check=True, timeout=90, stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                    env={'PATH': '/usr/bin:/bin', 'HOME': str(job), 'TMPDIR': str(job)})
     if destination.is_symlink() or not destination.is_file() or not 1 <= destination.stat().st_size <= MAX_EXPORT_BYTES:
         raise ValueError("Invalid MP4 output")
-    return {'mp4': str(destination), 'audio': False, 'run_id': run_id}
+    return {'mp4': str(destination), 'audio': bool(audio_inputs), 'run_id': run_id}

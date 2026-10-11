@@ -10,7 +10,7 @@ MAX_FRAMES = 240
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 MAX_EXPORT_BYTES = 256 * 1024 * 1024
 ACTIONS = frozenset({"createProject", "openProject", "getDocuments", "getTimeline", "getLibrary", "exportFrames",
-    "exportSpriteSheet", "exportAllSpriteSheets", "applyAnimation", "executeExtendScript"})
+    "exportSpriteSheet", "exportAllSpriteSheets", "applyAnimation", "executeExtendScript", "inspectAnimation", "inspectGraph", "authorScene", "applyPoses", "saveProject", "setAudio", "exportManagedFrames"})
 
 
 def load_config(filename=None):

@@ -144,7 +144,7 @@ class ArtifactTests(LocalTest):
         job = self.frames()
         for name in ['../', 'run-' + '0' * 32 + '/../../x', 'file:///etc', 'run-' + 'z' * 32]:
             with self.subTest(name=name), self.assertRaises(ValueError): find_job(self.config, name)
-        for index in [-1, 240, True, 0.5]:
+        for index in [-1, 1440, True, 0.5]:
             with self.subTest(index=index), self.assertRaises(ValueError): frame_content(self.config, job.name, index)
         (job / 'frame-000001.png').unlink(); (job / 'frame-000001.png').symlink_to(self.filename)
         with self.assertRaises(OSError): frame_content(self.config, job.name, 0)
@@ -305,7 +305,8 @@ class ProtocolTests(LocalTest):
         responses = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(len(responses), 4)
         self.assertEqual(responses[0]['result']['protocolVersion'], '2025-06-18')
-        self.assertEqual(len(responses[1]['result']['tools']), 12)
+        self.assertEqual(len(responses[1]['result']['tools']), 24)
+        self.assertNotIn('execute_extend_script',[t['name'] for t in responses[1]['result']['tools']])
         self.assertTrue(responses[2]['result']['isError'])
         self.assertEqual(responses[3]['error']['code'], -32601)
         self.assertNotIn(self.config['client_token'], result.stdout)

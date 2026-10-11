@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="local.animate.mcp.safe" ExtensionBundleVersion="1.0.7"
+<ExtensionManifest Version="7.0" ExtensionBundleId="local.animate.mcp.safe" ExtensionBundleVersion="1.3.0"
   ExtensionBundleName="Animate MCP Safe" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
   <Author>Local Animate MCP Safe fork</Author>
@@ -7,7 +7,7 @@
   <Abstract>Animate MCP Safe</Abstract>
 
   <ExtensionList>
-    <Extension Id="local.animate.mcp.safe" Version="1.0.7"/>
+    <Extension Id="local.animate.mcp.safe" Version="1.3.0"/>
   </ExtensionList>
 
   <ExecutionEnvironment>

@@ -9,6 +9,10 @@ from config import load_config, MAX_BODY
 from preview import frame_content, encode_mp4
 from validation import keys, validate_command
 from auth import strict_json, request_headers, check_response
+from animation_tools import TOOL_DEFINITIONS
+from motion import compile_motion, retime_motion, solve_two_bone
+from audio import begin, append, finalize
+from review import export_movie, review
 
 
 def obj(properties, required):
@@ -30,11 +34,15 @@ TOOLS = [
     {'name': 'apply_animation', 'description': 'Back up the pinned FLA into a new export directory, then apply bounded poses/keyframes and classic tweens to named symbol instances. Requires the pinned root scene; exit symbol editing first. Zero-based frame/layer indices. No arbitrary code.', 'inputSchema': obj({'document_id': DOC, 'timeline_index': INT, 'operations': {'type': 'array', 'minItems': 1, 'maxItems': 200, 'items': {'oneOf': [obj({'type': {'const': 'pose'}, 'layer': {'type': 'integer', 'minimum': 0, 'maximum': 199}, 'frame': INT, 'instance': {'type': 'string', 'maxLength': 128}, 'values': obj({'x': {'type': 'number'}, 'y': {'type': 'number'}, 'rotation': {'type': 'number'}, 'scaleX': {'type': 'number'}, 'scaleY': {'type': 'number'}, 'alpha': {'type': 'number', 'minimum': 0, 'maximum': 100}, 'firstFrame': INT, 'loop': {'enum': ['loop', 'play once', 'single frame']}}, [])}, ['type', 'layer', 'frame', 'instance', 'values']), obj({'type': {'const': 'classic_tween'}, 'layer': {'type': 'integer', 'minimum': 0, 'maximum': 199}, 'start_frame': INT, 'end_frame': INT, 'easing': {'type': 'integer', 'minimum': -100, 'maximum': 100}}, ['type', 'layer', 'start_frame', 'end_frame', 'easing'])]}}}, ['document_id', 'timeline_index', 'operations'])},
     {'name': 'execute_extend_script', 'description': 'DISABLED by default. Requires local allow_scripts=true AND manual approval of this exact script in the Animate panel. JSFL has access to files and is not sandboxed.', 'inputSchema': obj({'document_id': DOC, 'script': {'type': 'string', 'maxLength': 32768}}, ['document_id', 'script'])},
 ]
+TOOLS.extend(TOOL_DEFINITIONS)
+next(v for v in TOOLS if v['name']=='get_frame')['inputSchema']['properties']['index']['maximum'] = 1439
 SCHEMAS = {v['name']: v['inputSchema'] for v in TOOLS}
 ACTIONS = {'create_project': 'createProject', 'open_project': 'openProject', 'get_documents': 'getDocuments', 'get_timeline': 'getTimeline', 'get_library': 'getLibrary',
            'export_frames': 'exportFrames', 'export_sprite_sheet': 'exportSpriteSheet',
            'export_all_sprite_sheets': 'exportAllSpriteSheets', 'apply_animation': 'applyAnimation',
            'execute_extend_script': 'executeExtendScript'}
+ACTIONS.update({'get_animation_state':'inspectAnimation', 'get_symbol_graph':'inspectGraph',
+                'author_scene':'authorScene', 'save_project':'saveProject', 'set_audio':'setAudio'})
 
 
 def exchange(config, path, value, instance='hello'):
@@ -76,6 +84,7 @@ def request(config, action, options):
 
 
 def call_tool(config, name, args):
+    if name=='apply_animation':raise ValueError('Legacy unguarded edits are retired; use get_animation_state and apply_motion on a managed project')
     if name not in SCHEMAS:
         raise ValueError('Unknown tool')
     schema = SCHEMAS[name]
@@ -88,7 +97,28 @@ def call_tool(config, name, args):
         args.setdefault('step', 1)
     if name == 'get_frame':
         return {'content': [frame_content(config, args['run_id'], args['index'])], 'isError': False}
-    if name == 'create_preview':
+    if name == 'get_animation_state':
+        for key,value in {'layers':[], 'start_frame':0, 'end_frame':0, 'symbol_name':None}.items(): args.setdefault(key,value)
+    if name in ('plan_motion','apply_motion'):
+        step=args.get('step',2)
+        result=compile_motion(args['tracks'],step)
+        if name=='plan_motion':
+            include=args.get('include_poses',False)
+            if type(include) is not bool: raise ValueError('include_poses must be boolean')
+            if not include: result.pop('poses')
+        else:
+            command={k:args[k] for k in ('document_id','project_run_id','timeline_index','revision_id')}
+            result=request(config,'applyPoses',{**command,'poses':result['poses']})
+    elif name=='retime_motion':
+        result=retime_motion(args['tracks'],args['new_start'],args['new_end'])
+    elif name=='solve_two_bone_ik':
+        result=solve_two_bone(args['base'],args['target'],args['upper_length'],args['lower_length'],args.get('bend',1))
+    elif name=='begin_audio_upload': result=begin(config,args['total_bytes'])
+    elif name=='append_audio_chunk': result=append(config,args['run_id'],args['offset'],args['data_base64'])
+    elif name=='finish_audio_upload': result=finalize(config,args['run_id'])
+    elif name=='review_frames': result=review(config,args['run_id'],args['indices'])
+    elif name=='export_movie': result=export_movie(config,args,request)
+    elif name == 'create_preview':
         mp4 = args.pop('mp4', False)
         if type(mp4) is not bool:
             raise ValueError('mp4 must be boolean')
@@ -129,14 +159,14 @@ class Protocol:
                 self.initialized = True
                 result = {'protocolVersion': version if version in supported else supported[-1],
                           'capabilities': {'tools': {}},
-                          'serverInfo': {'name': 'animate-mcp-safe', 'version': '1.0.7'},
-                          'instructions': 'Use document IDs, backed-up declarative edits, export_frames/create_preview and get_frame for visual QA. General JSFL is disabled. No audio/runtime code is simulated by PNG playback.'}
+                          'serverInfo': {'name': 'animate-mcp-safe', 'version': '1.3.0'},
+                          'instructions': 'Use managed project IDs. Inspect scoped animation with get_animation_state, plan exact motion, then apply with its fresh single-use revision. Every guarded edit makes a backup and apply_motion verifies native matrices. Inspect rendered PNGs with get_frame/review_frames; export_movie renders longer scenes and recorded PCM cues. Never blindly retry edits after errors. Authoring values do not prove rendered appearance; runtime MovieClips/ActionScript are not simulated. General JSFL is disabled.'}
             elif method == 'ping':
                 result = {}
             elif not self.initialized:
                 raise ValueError('Initialize first')
             elif method == 'tools/list':
-                result = {'tools': TOOLS}
+                result = {'tools': [tool for tool in TOOLS if tool['name']!='apply_animation' and (self.config['allow_scripts'] or tool['name']!='execute_extend_script')]}
             elif method == 'tools/call':
                 keys(params, ('name',), ('arguments', '_meta'))
                 try:

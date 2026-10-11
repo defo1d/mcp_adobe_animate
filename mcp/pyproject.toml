@@ -1,6 +1,6 @@
 [project]
 name = "animate-mcp-safe"
-version = "1.0.7"
+version = "1.3.0"
 description = "Loopback-only Adobe Animate MCP, pairing, bounded animation edits and visual previews"
 requires-python = ">=3.11"
 dependencies = []

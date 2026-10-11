@@ -24,6 +24,10 @@ def keys(obj, required, optional=()):
 def validate_command(action, options, allow_scripts=False):
     if not isinstance(action, str) or action not in ACTIONS:
         raise ValueError("Unsupported action")
+    if action in {"inspectAnimation", "inspectGraph", "authorScene", "applyPoses", "saveProject", "setAudio"}:
+        from animation_tools import validate_new
+        validate_new(action, options)
+        return
     if action == "getDocuments":
         keys(options, ())
         return
@@ -46,8 +50,11 @@ def validate_command(action, options, allow_scripts=False):
         return
     if action in {"getTimeline", "getLibrary"}:
         keys(options, ("document_id",))
-    elif action == "exportFrames":
-        keys(options, ("document_id", "timeline_index", "start_frame", "end_frame", "step"))
+    elif action in {"exportFrames", "exportManagedFrames"}:
+        keys(options, ("document_id", "timeline_index", "start_frame", "end_frame", "step") + (("project_run_id",) if action == "exportManagedFrames" else ()))
+        if action == "exportManagedFrames":
+            from animation_tools import validate_scope
+            validate_scope(options)
         integer(options['timeline_index'], 0, 9999)
         start = integer(options["start_frame"], 0, 9999)
         end = integer(options["end_frame"], start, 9999)

@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+examples/generated_artwork/
+examples/reports/
 .venv/
 exports/
 local-config.json

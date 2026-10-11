@@ -60,7 +60,7 @@ function runInHost(packet, rawFunction) {
             } else {
                 requireValue(FLfile.exists(opts.project_uri), 'Managed project is missing');
                 item = null;
-                for (i=0; i<docs.length; i++) if (docs[i].pathURI === opts.project_uri) {item=docs[i];break;}
+                for (i=0; i<docs.length; i++) if (docs[i].pathURI === opts.project_uri || (opts.project_path && docs[i].path === opts.project_path)) {item=docs[i];break;}
                 if (item) fl.setActiveWindow(item);
                 else item = fl.openDocument(opts.project_uri);
                 requireValue(!!item, 'Could not open the managed project');
@@ -86,7 +86,7 @@ function runInHost(packet, rawFunction) {
         requireValue(fl.getDocumentDOM().id === opts.document_id, 'Document focus changed');
         tl = doc.getTimeline();
         oldFrame = tl.currentFrame; oldLayer = tl.currentLayer;
-        if (packet.action === 'exportFrames' || packet.action === 'applyAnimation') {
+        if (packet.action === 'exportFrames' || packet.action === 'exportManagedFrames' || packet.action === 'applyAnimation') {
             requireValue(doc.currentTimeline === opts.timeline_index, 'Scene changed; inspect timeline before retrying');
             requireValue(!tl.libraryItem, 'Exit symbol editing before exporting or editing scene animation');
         }
@@ -138,7 +138,8 @@ function runInHost(packet, rawFunction) {
                 if (librarySize + entrySize > 40000) { data.truncated = true; break; }
                 data.items.push(entry); librarySize += entrySize;
             }
-        } else if (packet.action === 'exportFrames') {
+        } else if (packet.action === 'exportFrames' || packet.action === 'exportManagedFrames') {
+            if (packet.action === 'exportManagedFrames') requireValue((typeof opts.managed_project_uri === 'string' && doc.pathURI === opts.managed_project_uri) || (typeof opts.managed_project_path === 'string' && opts.managed_project_path.length > 0 && doc.path === opts.managed_project_path), 'Managed project identity changed');
             requireValue(!tl.libraryItem, 'Exit symbol editing before exporting stage frames');
             requireValue(opts.end_frame < tl.frameCount, 'Frame range exceeds timeline');
             requireValue(doc.width > 0 && doc.width <= 4096 && doc.height > 0 && doc.height <= 4096, 'Stage exceeds export bounds');
@@ -262,7 +263,7 @@ function runInHost(packet, rawFunction) {
 
 function executePacket(packet, session, allowScripts, approve) {
     const actions = ['createProject', 'openProject', 'getDocuments', 'getTimeline', 'getLibrary', 'exportFrames', 'exportSpriteSheet',
-        'exportAllSpriteSheets', 'applyAnimation', 'executeExtendScript'];
+        'exportAllSpriteSheets', 'exportManagedFrames', 'applyAnimation', 'executeExtendScript', 'prepareBackup', 'inspectAnimation', 'inspectGraph', 'authorScene', 'applyPoses', 'saveProject', 'setAudio'];
     if (!packet || actions.indexOf(packet.action) < 0 || packet.session !== session ||
         !/^[0-9a-f]{32}$/.test(packet.id) || !Number.isFinite(packet.expires_at) || Date.now() >= packet.expires_at)
         return Promise.resolve({ok: false, error: 'Rejected or expired packet'});
@@ -273,7 +274,8 @@ function executePacket(packet, session, allowScripts, approve) {
     if (Date.now() >= packet.expires_at)
         return Promise.resolve({ok: false, error: 'Approval expired'});
     const data = JSON.stringify(packet).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
-    let script = '(' + runInHost.toString() + ')(' + data;
+    const animated = ['prepareBackup', 'inspectAnimation', 'inspectGraph', 'authorScene', 'applyPoses', 'saveProject', 'setAudio'].indexOf(packet.action) >= 0;
+    let script = '(' + (animated ? runAnimationHost : runInHost).toString() + ')(' + data;
     if (raw) script += ', function(doc) {\n' + packet.options.script + '\n}';
     script += ')';
     return new Promise(function (resolve) {

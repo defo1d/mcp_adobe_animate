@@ -13,6 +13,9 @@ from config import MAX_BODY, load_config, prepare_root
 from preview import create_job, finish_frames, read_png, project_file
 from validation import keys, validate_command
 from auth import strict_json, check_request, response_signature
+from animation_tools import NEW_ACTIONS, MUTATIONS
+from audio import audio_file, add_cue, read_cues
+from backup import preserve_snapshot
 
 
 class Pending:
@@ -34,6 +37,7 @@ class Broker:
         self.session = None
         self.last_poll = 0
         self.poll_session = None
+        self.revisions = {}
 
     def disconnect(self, session):
         with self.lock:
@@ -41,6 +45,7 @@ class Broker:
                 raise ValueError('Panel session changed')
             self.session = None
             self.poll_session = None
+            self.revisions.clear()
             for item in self.pending.values():
                 item.result = {'ok': False, 'error': 'Panel disconnected; operation may already have started'}
                 item.event.set()
@@ -65,6 +70,7 @@ class Broker:
                 self.commands.get_nowait()
             # An old poll keeps its old queue; it must never consume a new session's work.
             self.commands = queue.Queue(maxsize=8)
+            self.revisions.clear()
             self.poll_session = None
             self.session = session
             self.last_poll = time.monotonic()
@@ -118,22 +124,11 @@ class Broker:
             item.event.set()
         return {'accepted': True}
 
-    def command(self, action, options):
-        validate_command(action, options, self.config['allow_scripts'])
-        with self.lock:
-            if not self.session or time.monotonic() - self.last_poll > 35:
-                raise ValueError('Open the Animate panel and pair it first')
-            if len(self.pending) >= 8:
-                raise ValueError('Too many pending commands')
-            session = self.session
-        options = dict(options)
-        job = None
-        if action in {'createProject', 'exportFrames', 'exportSpriteSheet', 'exportAllSpriteSheets', 'applyAnimation'}:
-            job = create_job(self.config)
-            options['output_uri'] = job.as_uri() + '/'
-        elif action == 'openProject':
-            options['project_uri'] = project_file(self.config,options['run_id']).as_uri()
+    def _native(self, action, options, session, job=None, deadline=None):
+        remaining = max(0, deadline-time.monotonic()) if deadline is not None else 120
+        if remaining <= 0: raise ValueError('Command expired; inspect before retrying')
         item = Pending(action, options, session)
+        item.packet['expires_at'] = int((time.time()+remaining)*1000)
         with self.lock:
             if session != self.session:
                 raise ValueError('Panel disconnected')
@@ -146,45 +141,117 @@ class Broker:
                 self.pending.pop(item.packet['id'], None)
                 raise ValueError('Command queue is full')
         try:
-            if not item.event.wait(120):
+            if not item.event.wait(remaining):
                 raise ValueError('Command timed out; it may already have started. Inspect the project before retrying.')
             result = item.result
             if not result['ok']:
-                raise ValueError(str(result.get('error', 'Animate failed'))[:1024])
-            data = result['data']
-            expected_type = list if action == 'getDocuments' else dict
-            if not isinstance(data, expected_type):
-                raise ValueError('Invalid host response')
-            if action == 'exportFrames':
-                data = finish_frames(self.config, job, options, data)
-            elif action == 'createProject':
-                target = job / 'project.fla'
-                info = target.lstat()
-                if target.is_symlink() or not target.is_file() or not 1 <= info.st_size <= 134217728:
-                    raise ValueError('Project was not saved safely; inspect the new document')
-                with (job / 'project.json').open('x') as stream:
-                    json.dump({'kind':'animate-mcp-project-v1','file':'project.fla'},stream)
-                data.update(run_id=job.name,project_fla=str(project_file(self.config,job.name)))
-            elif action in {'exportSpriteSheet', 'exportAllSpriteSheets'}:
-                count = data.get('count') if isinstance(data, dict) else None
-                if type(count) is not int or not 1 <= count <= 64:
-                    raise ValueError('Invalid sprite export count')
-                total = 0
-                for i in range(count):
-                    png, _ = read_png(job / ('sprite-%06d.png' % (i + 1)))
-                    total += len(png)
-                    if total > 256 * 1024 * 1024:
-                        raise ValueError('Sprite export exceeds 256 MiB')
-                data = {'run_id': job.name, 'count': count, 'directory': str(job)}
-            elif action == 'applyAnimation':
-                backup = job / 'backup.fla'
-                if backup.is_symlink() or not backup.is_file() or backup.stat().st_size == 0:
-                    raise ValueError('Backup was not created; inspect the document before retrying')
-                data['backup'] = str(backup)
-            return data
+                suffix=''
+                if job and (job/'backup.fla').is_file() and not (job/'backup.fla').is_symlink() and (job/'backup.fla').stat().st_size:
+                    suffix='; recovery backup: '+str(job/'backup.fla')
+                raise ValueError(str(result.get('error', 'Animate failed'))[:800]+suffix)
+            return result
         finally:
             with self.lock:
                 self.pending.pop(item.packet['id'], None)
+
+    def command(self, action, options):
+        deadline = time.monotonic()+120
+        validate_command(action, options, self.config['allow_scripts'])
+        if action=='applyAnimation':
+            raise ValueError('Legacy unguarded edits are retired; use a managed project and a fresh inspection revision')
+        with self.lock:
+            if not self.session or time.monotonic() - self.last_poll > 35:
+                raise ValueError('Open the Animate panel and pair it first')
+            if len(self.pending) >= 8:
+                raise ValueError('Too many pending commands')
+            session = self.session
+        options = dict(options)
+        job = None
+        backup_digest = None
+        if action in NEW_ACTIONS or action == 'exportManagedFrames':
+            project = project_file(self.config, options['project_run_id'])
+            options['managed_project_uri'] = project.as_uri()
+            options['managed_project_path'] = str(project)
+            if action in MUTATIONS:
+                with self.lock:
+                    revision = self.revisions.pop(options['revision_id'], None)
+                if not revision or time.monotonic()-revision['created']>600:
+                    raise ValueError('Inspection revision is expired, consumed or missing; inspect again')
+                scope = revision['scope']
+                if any(options[key] != scope[key] for key in ('document_id','project_run_id','timeline_index')):
+                    raise ValueError('Inspection belongs to another managed project/document')
+                options['inspection_scope'] = scope
+                options['expected_state'] = revision['state_json']
+                if action == 'setAudio':
+                    cues=read_cues(project)
+                    if len(cues)>=32 or any(c['layer']==options['layer'] for c in cues):
+                        raise ValueError('Audio cue limit or duplicate layer')
+                    path, _ = audio_file(self.config, options['audio_run_id'])
+                    options['audio_uri'] = path.as_uri()
+        if action in {'createProject', 'exportFrames', 'exportManagedFrames', 'exportSpriteSheet', 'exportAllSpriteSheets', 'applyAnimation'} | MUTATIONS:
+            job = create_job(self.config)
+            options['output_uri'] = job.as_uri() + '/'
+        elif action == 'openProject':
+            options['project_uri'] = project_file(self.config,options['run_id']).as_uri()
+            options['project_path'] = str(project_file(self.config,options['run_id']))
+        if len(json.dumps(options, allow_nan=False).encode()) > MAX_BODY-2048:
+            raise ValueError('Guarded packet too large; inspect a shorter span or apply fewer poses')
+        if action in MUTATIONS:
+            prepared = self._native('prepareBackup', options, session, job, deadline)
+            if prepared.get('data') != {'snapshot_prepared': True}:
+                raise ValueError('Panel cannot prepare guarded backups; update the signed panel')
+            backup_digest = preserve_snapshot(job, deadline)
+            options['backup_prepared'] = True
+        result = self._native(action, options, session, job, deadline)
+        data = result['data']
+        expected_type = list if action == 'getDocuments' else dict
+        if not isinstance(data, expected_type):
+            raise ValueError('Invalid host response')
+        if action == 'inspectAnimation':
+            state_json = data.pop('state_json', None)
+            if not isinstance(state_json,str) or len(state_json)>48000 or not isinstance(data.get('state'),dict):
+                raise ValueError('Malformed animation inspection')
+            state = strict_json(state_json)
+            if state != data['state'] or state.get('document_id') != options['document_id']:
+                raise ValueError('Inspection state does not match the pinned document')
+            revision_id = uuid.uuid4().hex
+            scope = {k: options[k] for k in ('document_id','project_run_id','timeline_index','layers','start_frame','end_frame','symbol_name')}
+            with self.lock:
+                self.revisions = {k:v for k,v in self.revisions.items() if time.monotonic()-v['created']<=600}
+                if len(self.revisions)>=32: self.revisions.pop(next(iter(self.revisions)))
+                self.revisions[revision_id] = {'scope':scope,'state_json':state_json,'created':time.monotonic()}
+            data.update(revision_id=revision_id,revision_scope=scope,revision_ttl_seconds=600)
+        elif action in {'exportFrames','exportManagedFrames'}:
+            data = finish_frames(self.config, job, options, data)
+        elif action == 'createProject':
+            target = job / 'project.fla'
+            info = target.lstat()
+            if target.is_symlink() or not target.is_file() or not 1 <= info.st_size <= 134217728:
+                raise ValueError('Project was not saved safely; inspect the new document')
+            with (job / 'project.json').open('x') as stream:
+                json.dump({'kind':'animate-mcp-project-v1','file':'project.fla'},stream)
+            data.update(run_id=job.name,project_fla=str(project_file(self.config,job.name)))
+        elif action in {'exportSpriteSheet', 'exportAllSpriteSheets'}:
+            count = data.get('count') if isinstance(data, dict) else None
+            if type(count) is not int or not 1 <= count <= 64:
+                raise ValueError('Invalid sprite export count')
+            total = 0
+            for i in range(count):
+                png, _ = read_png(job / ('sprite-%06d.png' % (i + 1)))
+                total += len(png)
+                if total > 256 * 1024 * 1024:
+                    raise ValueError('Sprite export exceeds 256 MiB')
+            data = {'run_id': job.name, 'count': count, 'directory': str(job)}
+        elif action == 'applyAnimation' or action in MUTATIONS:
+            backup = job / 'backup.fla'
+            if backup.is_symlink() or not backup.is_file() or backup.stat().st_size == 0:
+                raise ValueError('Backup was not created; inspect the document before retrying')
+            data['backup'] = str(backup)
+            data['backup_sha256'] = backup_digest
+            if action == 'setAudio':
+                add_cue(project, {k: options[k] for k in ('audio_run_id','layer','start_frame')} | {'sound_name':data['sound_name']})
+        return data
+
 
 
 class Server(ThreadingHTTPServer):
