@@ -1,0 +1,2 @@
+# Python 3.11+ standard library only. No pip/uv/npm installation required.
+# Optional MP4 output uses an existing, explicitly configured ffmpeg executable.

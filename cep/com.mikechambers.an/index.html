@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http://127.0.0.1:*; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Animate MCP Safe</title><link rel="stylesheet" href="style.css"></head><body>
+<div class="container"><h3>Animate MCP Safe</h3><p id="statusText">Disconnected</p>
+<label for="messageLog">Activity</label><textarea id="messageLog" readonly></textarea>
+<label for="pairToken">Panel pairing token</label><input id="pairToken" type="password" autocomplete="off" spellcheck="false">
+<label for="pairFile">Load private pairing file</label><input id="pairFile" type="file" accept=".json">
+<label for="port">Local bridge port</label><input id="port" type="number" value="3099" min="1024" max="65535">
+<button id="btnConnect">Connect</button><p>Use panel_token from your private configuration. Connect only while working.</p>
+</div>
+<script src="host.js"></script><script src="auth.js"></script><script src="commands.js"></script><script src="pairing.js"></script><script src="main.js"></script>
+</body></html>
